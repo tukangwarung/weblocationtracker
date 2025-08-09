@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Geolocation Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #e2e8f0; /* Lighter gray-blue background */
+            padding: 1rem;
+        }
+        #canvas-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            aspect-ratio: 4/3;
+            border: 2px solid #94a3b8; /* Slate border */
+            border-radius: 1rem; /* More rounded corners */
+            overflow: hidden;
+            background-color: #f8fafc; /* Off-white background */
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+            margin-bottom: 2rem;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .button-group {
+            display: flex;
+            gap: 1rem;
+        }
+        .btn {
+            font-weight: 600;
+            padding: 0.75rem 2rem;
+            border-radius: 9999px; /* Fully rounded */
+            transition: all 0.2s ease-in-out;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        #startBtn {
+            background-color: #2563eb;
+            color: white;
+        }
+        #startBtn:hover {
+            background-color: #1d4ed8;
+        }
+        #stopBtn {
+            background-color: #ef4444;
+            color: white;
+        }
+        #stopBtn:hover {
+            background-color: #dc2626;
+        }
+        #status-message {
+            margin-top: 1rem;
+            color: #4a5568;
+            font-size: 0.875rem;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="locationCanvas"></canvas>
+    </div>
+
+    <div class="button-group">
+        <button id="startBtn" class="btn">Start Live Tracking</button>
+        <button id="stopBtn" class="btn" disabled>Stop Tracking</button>
+    </div>
+    <div id="status-message"></div>
+
+    <script type="module">
+        // Firebase imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Setup
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db, auth, userId = null;
+
+        // Initialize Firebase on window load
+        window.addEventListener('load', async () => {
+            if (Object.keys(firebaseConfig).length > 0) {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                try {
+                    // Sign in with the custom token if available, otherwise sign in anonymously
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Firebase Auth Error:", error);
+                }
+
+                // Listen for auth state changes to get the user ID
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Authenticated with user ID:", userId);
+                        document.getElementById('status-message').textContent = `Authenticated. Your User ID is: ${userId}`;
+                        startBtn.disabled = false;
+                    } else {
+                        console.log("No user signed in.");
+                        document.getElementById('status-message').textContent = 'Please wait for authentication...';
+                        startBtn.disabled = true;
+                    }
+                });
+            } else {
+                console.error("Firebase configuration is missing.");
+                document.getElementById('status-message').textContent = 'Firebase is not configured. Live tracking will not work.';
+            }
+        });
+
+        const canvas = document.getElementById('locationCanvas');
+        const ctx = canvas.getContext('2d');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+
+        let watchId = null; // Stores the ID for the live tracker
+        let timerId = null; // Stores the ID for the 8-hour timeout
+
+        // Set the canvas size to match its container
+        function resizeCanvas() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+            drawInitialText();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Function to draw messages on the canvas
+        function drawMessage(title, message, color = '#1a202c') {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.textAlign = 'center';
+            ctx.fillStyle = color;
+
+            ctx.font = `700 1.5rem 'Inter', sans-serif`;
+            ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 20);
+
+            ctx.font = `400 1rem 'Inter', sans-serif`;
+            ctx.fillStyle = '#4a5568';
+            ctx.fillText(message, canvas.width / 2, canvas.height / 2 + 20);
+        }
+
+        function drawInitialText() {
+            drawMessage("Live Location Tracker", "Waiting for authentication...");
+        }
+
+        // Function to stop the tracking and timer
+        function stopTracking() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+                clearTimeout(timerId);
+                timerId = null;
+                drawMessage("Tracking Stopped", "Location updates have been manually stopped.");
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+        
+        // Function to save location data to Firestore
+        async function saveLocationToFirestore(position) {
+            if (!db || !userId) {
+                console.error("Firestore not initialized or user not authenticated.");
+                return;
+            }
+
+            const { latitude, longitude } = position.coords;
+            const timestamp = new Date(position.timestamp).toISOString();
+
+            const locationData = {
+                latitude,
+                longitude,
+                timestamp,
+                userId: userId // Store the user ID for identification
+            };
+
+            const docRef = doc(db, "artifacts", appId, "public", "data", "live-locations", userId);
+
+            try {
+                await setDoc(docRef, locationData);
+                console.log("Location saved to Firestore successfully!");
+            } catch (e) {
+                console.error("Error saving location:", e);
+            }
+        }
+
+        // Event listener for the "Start Tracking" button
+        startBtn.addEventListener('click', () => {
+            if ("geolocation" in navigator) {
+                if (watchId !== null) {
+                    stopTracking();
+                }
+
+                drawMessage("Tracking...", "Waiting for the first location update.");
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+
+                watchId = navigator.geolocation.watchPosition(
+                    (position) => {
+                        const { latitude, longitude } = position.coords;
+                        const timestamp = new Date(position.timestamp).toLocaleTimeString();
+                        drawMessage(
+                            "Location Updated!",
+                            `Lat: ${latitude.toFixed(4)}, Lng: ${longitude.toFixed(4)}\nUpdated at: ${timestamp}`,
+                            '#2f855a'
+                        );
+                        // Save the location to Firestore with every update
+                        saveLocationToFirestore(position);
+                    },
+                    (error) => {
+                        let errorMessage = "An error occurred.";
+                        if (error.code === error.PERMISSION_DENIED) {
+                            errorMessage = "Location permission denied.";
+                        } else if (error.code === error.POSITION_UNAVAILABLE) {
+                            errorMessage = "Location information is unavailable.";
+                        } else if (error.code === error.TIMEOUT) {
+                            errorMessage = "Location request timed out.";
+                        }
+                        drawMessage(errorMessage, "Please try again or enable location access.", '#e53e3e');
+                        console.error("Geolocation Error:", error);
+                        stopTracking();
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 15000,
+                        maximumAge: 0
+                    }
+                );
+
+                const eightHoursInMs = 8 * 60 * 60 * 1000;
+                const demoTimeoutInMs = 30 * 1000;
+                
+                timerId = setTimeout(() => {
+                    stopTracking();
+                    drawMessage("Tracking Session Ended", "The 8-hour tracking session has completed.", '#4c51bf');
+                }, demoTimeoutInMs); // Change to 'eightHoursInMs' for 8 hours
+            } else {
+                drawMessage("Geolocation Not Supported", "Your browser does not support this feature.", '#e53e3e');
+                console.error("Geolocation is not supported by this browser.");
+            }
+        });
+
+        stopBtn.addEventListener('click', stopTracking);
+    </script>
+</body>
+</html>
